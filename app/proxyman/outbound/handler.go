@@ -272,7 +272,11 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 					outbound = new(session.Outbound)
 					ctx = session.ContextWithOutbound(ctx, outbound)
 				}
-				outbound.Gateway = h.senderSettings.Via.AsAddress()
+				if h.senderSettings.ViaCidr == "" {
+					outbound.Gateway = h.senderSettings.Via.AsAddress()
+				} else { //Get a random address.
+					outbound.Gateway = ParseRandomIPv6(h.senderSettings.Via.AsAddress(), h.senderSettings.ViaCidr)
+				}
 			} else {
 				if inbound := session.InboundFromContext(ctx); inbound.Conn != nil {
 					useIncoming := false
@@ -310,13 +314,6 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 					}
 				}
 			}
-
-			if h.senderSettings.ViaCidr == "" {
-				outbound.Gateway = h.senderSettings.Via.AsAddress()
-			} else { //Get a random address.
-				outbound.Gateway = ParseRandomIPv6(h.senderSettings.Via.AsAddress(), h.senderSettings.ViaCidr)
-			}
-
 		}
 	}
 
