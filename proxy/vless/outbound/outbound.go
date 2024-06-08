@@ -70,12 +70,12 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 
 // Process implements proxy.Outbound.Process().
 func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
-	outbound := session.OutboundFromContext(ctx)
-	if outbound == nil || !outbound.Target.IsValid() {
+	outbounds := session.OutboundsFromContext(ctx)
+	ob := outbounds[len(outbounds) - 1]
+	if !ob.Target.IsValid() {
 		return newError("target not specified").AtError()
 	}
-	outbound.Name = "vless"
-	inbound := session.InboundFromContext(ctx)
+	ob.Name = "vless"
 
 	var rec *protocol.ServerSpec
 	var conn stat.Connection
@@ -96,7 +96,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	if statConn, ok := iConn.(*stat.CounterConnection); ok {
 		iConn = statConn.Connection
 	}
-	target := outbound.Target
+	target := ob.Target
 	newError("tunneling request to ", target, " via ", rec.Destination().NetAddr()).AtInfo().WriteToLog(session.ExportIDToError(ctx))
 
 	command := protocol.RequestCommandTCP
@@ -130,15 +130,12 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		requestAddons.Flow = requestAddons.Flow[:16]
 		fallthrough
 	case vless.XRV:
-		if inbound != nil {
-			inbound.SetCanSpliceCopy(2)
-		}
+		ob.CanSpliceCopy = 2
 		switch request.Command {
 		case protocol.RequestCommandUDP:
 			if !allowUDP443 && request.Port == 443 {
 				return newError("XTLS rejected UDP/443 traffic").AtInfo()
 			}
-			requestAddons.Flow = ""
 		case protocol.RequestCommandMux:
 			fallthrough // let server break Mux connections that contain TCP requests
 		case protocol.RequestCommandTCP:
@@ -162,9 +159,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			rawInput = (*bytes.Buffer)(unsafe.Pointer(p + r.Offset))
 		}
 	default:
-		if inbound != nil {
-			inbound.SetCanSpliceCopy(3)
-		}
+		ob.CanSpliceCopy = 3
 	}
 
 	var newCtx context.Context
@@ -185,7 +180,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	clientReader := link.Reader // .(*pipe.Reader)
 	clientWriter := link.Writer // .(*pipe.Writer)
 	trafficState := proxy.NewTrafficState(account.ID.Bytes())
-	if request.Command == protocol.RequestCommandUDP && h.cone && request.Port != 53 && request.Port != 443 {
+	if request.Command == protocol.RequestCommandUDP && (requestAddons.Flow == vless.XRV || (h.cone && request.Port != 53 && request.Port != 443)) {
 		request.Command = protocol.RequestCommandMux
 		request.Address = net.DomainAddress("v1.mux.cool")
 		request.Port = net.Port(666)
@@ -239,8 +234,8 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 					return newError(`failed to use `+requestAddons.Flow+`, found outer tls version `, utlsConn.ConnectionState().Version).AtWarning()
 				}
 			}
-			ctx1 := session.ContextWithOutbound(ctx, nil) // TODO enable splice
-			err = encoding.XtlsWrite(clientReader, serverWriter, timer, conn, trafficState, ctx1)
+			ctx1 := session.ContextWithInbound(ctx, nil) // TODO enable splice
+			err = encoding.XtlsWrite(clientReader, serverWriter, timer, conn, trafficState, ob, ctx1)
 		} else {
 			// from clientReader.ReadMultiBuffer to serverWriter.WriteMultiBufer
 			err = buf.Copy(clientReader, serverWriter, buf.UpdateActivity(timer))
@@ -266,12 +261,19 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 		// default: serverReader := buf.NewReader(conn)
 		serverReader := encoding.DecodeBodyAddons(conn, request, responseAddons)
+		if requestAddons.Flow == vless.XRV {
+			serverReader = proxy.NewVisionReader(serverReader, trafficState, ctx)
+		}
 		if request.Command == protocol.RequestCommandMux && request.Port == 666 {
-			serverReader = xudp.NewPacketReader(conn)
+			if requestAddons.Flow == vless.XRV {
+				serverReader = xudp.NewPacketReader(&buf.BufferedReader{Reader: serverReader})
+			} else {
+				serverReader = xudp.NewPacketReader(conn)
+			}
 		}
 
 		if requestAddons.Flow == vless.XRV {
-			err = encoding.XtlsRead(serverReader, clientWriter, timer, conn, input, rawInput, trafficState, ctx)
+			err = encoding.XtlsRead(serverReader, clientWriter, timer, conn, input, rawInput, trafficState, ob, ctx)
 		} else {
 			// from serverReader.ReadMultiBuffer to clientWriter.WriteMultiBufer
 			err = buf.Copy(serverReader, clientWriter, buf.UpdateActivity(timer))

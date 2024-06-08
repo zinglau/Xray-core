@@ -43,6 +43,8 @@ func transportProtocolToString(protocol TransportProtocol) string {
 		return "websocket"
 	case TransportProtocol_DomainSocket:
 		return "domainsocket"
+	case TransportProtocol_HTTPUpgrade:
+		return "httpupgrade"
 	default:
 		return unknownProtocol
 	}
@@ -56,6 +58,8 @@ func RegisterProtocolConfigCreator(name string, creator ConfigCreator) error {
 	return nil
 }
 
+// Note: Each new transport needs to add init() func in transport/internet/xxx/config.go
+// Otherwise, it will cause #3244
 func CreateTransportConfig(name string) (interface{}, error) {
 	creator, ok := globalTransportConfigCreatorCache[name]
 	if !ok {

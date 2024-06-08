@@ -12,6 +12,7 @@ import (
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/stats"
+	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	core "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/transport/internet"
@@ -281,7 +282,7 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {
 
 type OutboundDetourConfig struct {
 	Protocol      string           `json:"protocol"`
-	SendThrough   *Address         `json:"sendThrough"`
+	SendThrough   *string          `json:"sendThrough"`
 	Tag           string           `json:"tag"`
 	Settings      *json.RawMessage `json:"settings"`
 	StreamSetting *StreamConfig    `json:"streamSettings"`
@@ -308,9 +309,14 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 	}
 
 	if c.SendThrough != nil {
-		address := c.SendThrough
-		if address.Family().IsDomain() {
-			return nil, newError("unable to send through: " + address.String())
+		address := ParseSendThough(c.SendThrough)
+		//Check if CIDR exists
+		if strings.Contains(*c.SendThrough, "/") {
+			senderSettings.ViaCidr = strings.Split(*c.SendThrough, "/")[1]
+		} else {
+			if address.Family().IsDomain() {
+				return nil, newError("unable to send through: " + address.String())
+			}
 		}
 		senderSettings.Via = address.Build()
 	}
@@ -400,19 +406,20 @@ type Config struct {
 	// and should not be used.
 	OutboundDetours []OutboundDetourConfig `json:"outboundDetour"`
 
-	LogConfig       *LogConfig             `json:"log"`
-	RouterConfig    *RouterConfig          `json:"routing"`
-	DNSConfig       *DNSConfig             `json:"dns"`
-	InboundConfigs  []InboundDetourConfig  `json:"inbounds"`
-	OutboundConfigs []OutboundDetourConfig `json:"outbounds"`
-	Transport       *TransportConfig       `json:"transport"`
-	Policy          *PolicyConfig          `json:"policy"`
-	API             *APIConfig             `json:"api"`
-	Metrics         *MetricsConfig         `json:"metrics"`
-	Stats           *StatsConfig           `json:"stats"`
-	Reverse         *ReverseConfig         `json:"reverse"`
-	FakeDNS         *FakeDNSConfig         `json:"fakeDns"`
-	Observatory     *ObservatoryConfig     `json:"observatory"`
+	LogConfig        *LogConfig              `json:"log"`
+	RouterConfig     *RouterConfig           `json:"routing"`
+	DNSConfig        *DNSConfig              `json:"dns"`
+	InboundConfigs   []InboundDetourConfig   `json:"inbounds"`
+	OutboundConfigs  []OutboundDetourConfig  `json:"outbounds"`
+	Transport        *TransportConfig        `json:"transport"`
+	Policy           *PolicyConfig           `json:"policy"`
+	API              *APIConfig              `json:"api"`
+	Metrics          *MetricsConfig          `json:"metrics"`
+	Stats            *StatsConfig            `json:"stats"`
+	Reverse          *ReverseConfig          `json:"reverse"`
+	FakeDNS          *FakeDNSConfig          `json:"fakeDns"`
+	Observatory      *ObservatoryConfig      `json:"observatory"`
+	BurstObservatory *BurstObservatoryConfig `json:"burstObservatory"`
 }
 
 func (c *Config) findInboundTag(tag string) int {
@@ -475,6 +482,10 @@ func (c *Config) Override(o *Config, fn string) {
 
 	if o.Observatory != nil {
 		c.Observatory = o.Observatory
+	}
+
+	if o.BurstObservatory != nil {
+		c.BurstObservatory = o.BurstObservatory
 	}
 
 	// deprecated attrs... keep them for now
@@ -545,6 +556,9 @@ func applyTransportConfig(s *StreamConfig, t *TransportConfig) {
 	}
 	if s.DSSettings == nil {
 		s.DSSettings = t.DSConfig
+	}
+	if s.HTTPUPGRADESettings == nil {
+		s.HTTPUPGRADESettings = t.HTTPUPGRADEConfig
 	}
 }
 
@@ -636,6 +650,14 @@ func (c *Config) Build() (*core.Config, error) {
 
 	if c.Observatory != nil {
 		r, err := c.Observatory.Build()
+		if err != nil {
+			return nil, err
+		}
+		config.App = append(config.App, serial.ToTypedMessage(r))
+	}
+
+	if c.BurstObservatory != nil {
+		r, err := c.BurstObservatory.Build()
 		if err != nil {
 			return nil, err
 		}
@@ -741,6 +763,13 @@ func (c *Config) Build() (*core.Config, error) {
 	}
 
 	return config, nil
+}
+
+// Convert string to Address.
+func ParseSendThough(Addr *string) *Address {
+	var addr Address
+	addr.Address = net.ParseAddress(strings.Split(*Addr, "/")[0])
+	return &addr
 }
 
 func ConfigFromTemplate (template, override interface{}) []byte {

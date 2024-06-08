@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/dice"
@@ -105,16 +106,16 @@ func isValidAddress(addr *net.IPOrDomain) bool {
 
 // Process implements proxy.Outbound.
 func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
-	outbound := session.OutboundFromContext(ctx)
-	if outbound == nil || !outbound.Target.IsValid() {
+	outbounds := session.OutboundsFromContext(ctx)
+	ob := outbounds[len(outbounds) - 1]
+	if !ob.Target.IsValid() {
 		return newError("target not specified.")
 	}
-	outbound.Name = "freedom"
+	ob.Name = "freedom"
+	ob.CanSpliceCopy = 1
 	inbound := session.InboundFromContext(ctx)
-	if inbound != nil {
-		inbound.SetCanSpliceCopy(1)
-	}
-	destination := outbound.Target
+
+	destination := ob.Target
 	UDPOverride := net.UDPDestination(nil, 0)
 	if h.config.DestinationOverride != nil {
 		server := h.config.DestinationOverride.Server
@@ -152,6 +153,18 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		if err != nil {
 			return err
 		}
+
+		if h.config.ProxyProtocol > 0 && h.config.ProxyProtocol <= 2 {
+			version := byte(h.config.ProxyProtocol)
+			srcAddr := inbound.Source.RawNetAddr()
+			dstAddr := rawConn.RemoteAddr()
+			header := proxyproto.HeaderProxyFromAddrs(version, srcAddr, dstAddr)
+			if _, err = header.WriteTo(rawConn); err != nil {
+				rawConn.Close()
+				return err
+			}
+		}
+
 		conn = rawConn
 		return nil
 	})
@@ -206,10 +219,12 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
 		if destination.Network == net.Network_TCP {
 			var writeConn net.Conn
+			var inTimer *signal.ActivityTimer
 			if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.Conn != nil && useSplice {
 				writeConn = inbound.Conn
+				inTimer = inbound.Timer
 			}
-			return proxy.CopyRawConnIfExist(ctx, conn, writeConn, link.Writer, timer)
+			return proxy.CopyRawConnIfExist(ctx, conn, writeConn, link.Writer, timer, inTimer)
 		}
 		reader := NewPacketReader(conn, UDPOverride)
 		if err := buf.Copy(reader, output, buf.UpdateActivity(timer)); err != nil {
@@ -360,6 +375,9 @@ func (f *FragmentWriter) Write(b []byte) (int, error) {
 			return f.writer.Write(b)
 		}
 		recordLen := 5 + ((int(b[3]) << 8) | int(b[4]))
+		if len(b) < recordLen { // maybe already fragmented somehow
+			return f.writer.Write(b)
+		}
 		data := b[5:recordLen]
 		buf := make([]byte, 1024)
 		for from := 0; ; {
