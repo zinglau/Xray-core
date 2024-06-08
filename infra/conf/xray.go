@@ -765,6 +765,13 @@ func (c *Config) Build() (*core.Config, error) {
 	return config, nil
 }
 
+// Convert string to Address.
+func ParseSendThough(Addr *string) *Address {
+	var addr Address
+	addr.Address = net.ParseAddress(strings.Split(*Addr, "/")[0])
+	return &addr
+}
+
 func ConfigFromTemplate (template, override interface{}) []byte {
 	t, _ := json.Marshal(template)
 	o, _ := json.Marshal(override)
@@ -814,11 +821,4 @@ func Override(template, override interface{}) {
 			}
 		}
 	}
-}
-
-// Convert string to Address.
-func ParseSendThough(Addr *string) *Address {
-	var addr Address
-	addr.Address = net.ParseAddress(strings.Split(*Addr, "/")[0])
-	return &addr
 }

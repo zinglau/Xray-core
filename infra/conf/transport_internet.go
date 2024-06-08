@@ -208,8 +208,10 @@ func (c *HttpUpgradeConfig) Build() (proto.Message, error) {
 	// Host priority: Host field > headers field > address.
 	if c.Host == "" && c.Headers["host"] != "" {
 		c.Host = c.Headers["host"]
+		delete(c.Headers,"host")
 	} else if c.Host == "" && c.Headers["Host"] != "" {
 		c.Host = c.Headers["Host"]
+		delete(c.Headers,"Host")
 	}
 	config := &httpupgrade.Config{
 		Path:                path,
@@ -392,7 +394,6 @@ type TLSConfig struct {
 	MinVersion                           string           `json:"minVersion"`
 	MaxVersion                           string           `json:"maxVersion"`
 	CipherSuites                         string           `json:"cipherSuites"`
-	PreferServerCipherSuites             bool             `json:"preferServerCipherSuites"`
 	Fingerprint                          string           `json:"fingerprint"`
 	RejectUnknownSNI                     bool             `json:"rejectUnknownSni"`
 	PinnedPeerCertificateChainSha256     *[]string        `json:"pinnedPeerCertificateChainSha256"`
@@ -424,7 +425,6 @@ func (c *TLSConfig) Build() (proto.Message, error) {
 	config.MinVersion = c.MinVersion
 	config.MaxVersion = c.MaxVersion
 	config.CipherSuites = c.CipherSuites
-	config.PreferServerCipherSuites = c.PreferServerCipherSuites
 	config.Fingerprint = strings.ToLower(c.Fingerprint)
 	if config.Fingerprint != "" && tls.GetFingerprint(config.Fingerprint) == nil {
 		return nil, newError(`unknown fingerprint: `, config.Fingerprint)
