@@ -268,7 +268,7 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 		}
 
 		if h.senderSettings.Via != nil {
-			outbounds := session.OutboundFromContext(ctx)
+			outbounds := session.OutboundsFromContext(ctx)
 			ob := outbounds[len(outbounds) - 1]
 			if h.senderSettings.ViaCidr == "" {
 				ob.Gateway = h.senderSettings.Via.AsAddress()
@@ -301,14 +301,13 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 					}
 				}
 				if useIncoming {
-					outbounds := session.OutboundFromContext(ctx)
+					outbounds := session.OutboundsFromContext(ctx)
 					ob := outbounds[len(outbounds) - 1]
 					newError("egressing through incoming IP ", localIP, " for destination ", dest.String()).
 						AtDebug().WriteToLog(session.ExportIDToError(ctx))
 					ob.Gateway = net.ParseAddress(localIP)
 				}
 			}
-		}
 		}
 	}
 
