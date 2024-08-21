@@ -473,16 +473,16 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 						default:
 							continue
 						}
-						newError("rt: ", rt).AtDebug().WriteToLog(session.ExportIDToError(ctx))
+						errors.LogInfo(ctx,"rt: ", rt)
 						if h := d.ohm.GetHandler(rt); h != nil {
-							newError("@ rule(s) result: ", rt).AtDebug().WriteToLog(session.ExportIDToError(ctx))
+							errors.LogInfo(ctx, "@ rule(s) result: ", rt)
 							handler = h
 							break
 						}
 					}
 				}
 				if handler == nil {
-					newError("no route found for: ", outTag).AtWarning().WriteToLog(session.ExportIDToError(ctx))
+					errors.LogError(ctx, "no route found for: ", outTag)
 				}
 			}
 		} else {
