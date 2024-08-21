@@ -62,6 +62,10 @@ ___
 
 [README](https://github.com/XTLS/Xray-core#readme) is open, so feel free to submit your project [here](https://github.com/XTLS/Xray-core/pulls).
 
+## Donation & NFTs
+
+[Announcement of NFTs by Project X](https://github.com/XTLS/Xray-core/discussions/3633)
+
 ## License
 
 [Mozilla Public License Version 2.0](https://github.com/XTLS/Xray-core/blob/main/LICENSE)
@@ -85,8 +89,7 @@ ___
   - [ghcr.io/xtls/xray-core](https://ghcr.io/xtls/xray-core) (**Official**)
   - [teddysun/xray](https://hub.docker.com/r/teddysun/xray)
 - Web Panel
-  - [X-UI-English](https://github.com/NidukaAkalanka/x-ui-english), [3X-UI](https://github.com/MHSanaei/3x-ui), [X-UI](https://github.com/alireza0/x-ui), [X-UI](https://github.com/diditra/x-ui)
-  - [Xray-UI](https://github.com/qist/xray-ui), [X-UI](https://github.com/sing-web/x-ui)
+  - [3X-UI](https://github.com/MHSanaei/3x-ui), [X-UI](https://github.com/alireza0/x-ui), [Xray-UI](https://github.com/qist/xray-ui)
   - [Hiddify](https://github.com/hiddify/hiddify-config)
   - [Marzban](https://github.com/Gozargah/Marzban)
   - [Libertea](https://github.com/VZiChoushaDui/Libertea)
@@ -125,13 +128,10 @@ ___
   - [luci-app-xray](https://github.com/yichya/luci-app-xray) ([openwrt-xray](https://github.com/yichya/openwrt-xray))
 - Windows
   - [v2rayN](https://github.com/2dust/v2rayN)
-  - [NekoRay](https://github.com/Matsuridayo/nekoray)
   - [Furious](https://github.com/LorenEteval/Furious)
-  - [HiddifyN](https://github.com/hiddify/HiddifyN)
   - [Invisible Man - Xray](https://github.com/InvisibleManVPN/InvisibleMan-XRayClient)
 - Android
   - [v2rayNG](https://github.com/2dust/v2rayNG)
-  - [HiddifyNG](https://github.com/hiddify/HiddifyNG)
   - [X-flutter](https://github.com/XTLS/X-flutter)
 - iOS & macOS arm64
   - [FoXray](https://apps.apple.com/app/foxray/id6448898396)
@@ -143,7 +143,6 @@ ___
   - [FoXray](https://apps.apple.com/app/foxray/id6448898396)
 - Linux
   - [v2rayA](https://github.com/v2rayA/v2rayA)
-  - [NekoRay](https://github.com/Matsuridayo/nekoray)
   - [Furious](https://github.com/LorenEteval/Furious)
 
 ## Others that support VLESS, XTLS, REALITY, XUDP, PLUX...
@@ -156,21 +155,15 @@ ___
   - [XTLS/libXray](https://github.com/XTLS/libXray)
   - [xtlsapi](https://github.com/hiddify/xtlsapi)
   - [AndroidLibXrayLite](https://github.com/2dust/AndroidLibXrayLite)
-  - [XrayKit](https://github.com/arror/XrayKit)
   - [Xray-core-python](https://github.com/LorenEteval/Xray-core-python)
   - [xray-api](https://github.com/XVGuardian/xray-api)
 - [XrayR](https://github.com/XrayR-project/XrayR)
   - [XrayR-release](https://github.com/XrayR-project/XrayR-release)
   - [XrayR-V2Board](https://github.com/missuo/XrayR-V2Board)
 - [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta)
-  - [Clash Verge](https://github.com/zzzgydi/clash-verge)
   - [clashN](https://github.com/2dust/clashN)
   - [Clash Meta for Android](https://github.com/MetaCubeX/ClashMetaForAndroid)
-  - [meta_for_ios](https://t.me/meta_for_ios)
 - [sing-box](https://github.com/SagerNet/sing-box)
-  - [installReality](https://github.com/BoxXt/installReality)
-  - [sbox-reality](https://github.com/Misaka-blog/sbox-reality)
-  - [sing-box-for-ios](https://github.com/SagerNet/sing-box-for-ios)
 
 ## Contributing
 

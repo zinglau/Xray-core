@@ -1,64 +1,74 @@
 package splithttp
 
 import (
+	"bytes"
 	"context"
 	gotls "crypto/tls"
 	"io"
-	gonet "net"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/common/signal/semaphore"
 	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/browser_dialer"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"github.com/xtls/xray-core/transport/pipe"
 	"golang.org/x/net/http2"
 )
 
+// defines the maximum time an idle TCP session can survive in the tunnel, so
+// it should be consistent across HTTP versions and with other transports.
+const connIdleTimeout = 300 * time.Second
+
+// consistent with quic-go
+const h3KeepalivePeriod = 10 * time.Second
+
+// consistent with chrome
+const h2KeepalivePeriod = 45 * time.Second
+
 type dialerConf struct {
 	net.Destination
 	*internet.MemoryStreamConfig
 }
 
-type reusedClient struct {
-	download *http.Client
-	upload   *http.Client
-	isH2     bool
-	// pool of net.Conn, created using dialUploadConn
-	uploadRawPool  *sync.Pool
-	dialUploadConn func(ctxInner context.Context) (net.Conn, error)
-}
-
 var (
-	globalDialerMap    map[dialerConf]reusedClient
+	globalDialerMap    map[dialerConf]DialerClient
 	globalDialerAccess sync.Mutex
 )
 
-func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) reusedClient {
-	globalDialerAccess.Lock()
-	defer globalDialerAccess.Unlock()
-
-	if globalDialerMap == nil {
-		globalDialerMap = make(map[dialerConf]reusedClient)
-	}
-
-	if client, found := globalDialerMap[dialerConf{dest, streamSettings}]; found {
-		return client
+func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) DialerClient {
+	if browser_dialer.HasBrowserDialer() {
+		return &BrowserDialerClient{}
 	}
 
 	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
 	isH2 := tlsConfig != nil && !(len(tlsConfig.NextProtocol) == 1 && tlsConfig.NextProtocol[0] == "http/1.1")
+	isH3 := tlsConfig != nil && (len(tlsConfig.NextProtocol) == 1 && tlsConfig.NextProtocol[0] == "h3")
+
+	globalDialerAccess.Lock()
+	defer globalDialerAccess.Unlock()
+
+	if globalDialerMap == nil {
+		globalDialerMap = make(map[dialerConf]DialerClient)
+	}
+
+	if isH3 {
+		dest.Network = net.Network_UDP
+	}
+	if client, found := globalDialerMap[dialerConf{dest, streamSettings}]; found {
+		return client
+	}
 
 	var gotlsConfig *gotls.Config
 
@@ -86,15 +96,68 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		return conn, nil
 	}
 
-	var uploadTransport http.RoundTripper
 	var downloadTransport http.RoundTripper
+	var uploadTransport http.RoundTripper
 
-	if isH2 {
+	if isH3 {
+		quicConfig := &quic.Config{
+			MaxIdleTimeout: connIdleTimeout,
+
+			// these two are defaults of quic-go/http3. the default of quic-go (no
+			// http3) is different, so it is hardcoded here for clarity.
+			// https://github.com/quic-go/quic-go/blob/b8ea5c798155950fb5bbfdd06cad1939c9355878/http3/client.go#L36-L39
+			MaxIncomingStreams: -1,
+			KeepAlivePeriod:    h3KeepalivePeriod,
+		}
+		roundTripper := &http3.RoundTripper{
+			QUICConfig:      quicConfig,
+			TLSClientConfig: gotlsConfig,
+			Dial: func(ctx context.Context, addr string, tlsCfg *gotls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+				conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
+				if err != nil {
+					return nil, err
+				}
+
+				var udpConn net.PacketConn
+				var udpAddr *net.UDPAddr
+
+				switch c := conn.(type) {
+				case *internet.PacketConnWrapper:
+					var ok bool
+					udpConn, ok = c.Conn.(*net.UDPConn)
+					if !ok {
+						return nil, errors.New("PacketConnWrapper does not contain a UDP connection")
+					}
+					udpAddr, err = net.ResolveUDPAddr("udp", c.Dest.String())
+					if err != nil {
+						return nil, err
+					}
+				case *net.UDPConn:
+					udpConn = c
+					udpAddr, err = net.ResolveUDPAddr("udp", c.RemoteAddr().String())
+					if err != nil {
+						return nil, err
+					}
+				default:
+					udpConn = &internet.FakePacketConn{c}
+					udpAddr, err = net.ResolveUDPAddr("udp", c.RemoteAddr().String())
+					if err != nil {
+						return nil, err
+					}
+				}
+
+				return quic.DialEarly(ctx, udpConn, udpAddr, tlsCfg, cfg)
+			},
+		}
+		downloadTransport = roundTripper
+		uploadTransport = roundTripper
+	} else if isH2 {
 		downloadTransport = &http2.Transport{
 			DialTLSContext: func(ctxInner context.Context, network string, addr string, cfg *gotls.Config) (net.Conn, error) {
 				return dialContext(ctxInner)
 			},
-			IdleConnTimeout: 90 * time.Second,
+			IdleConnTimeout: connIdleTimeout,
+			ReadIdleTimeout: h2KeepalivePeriod,
 		}
 		uploadTransport = downloadTransport
 	} else {
@@ -105,17 +168,17 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		downloadTransport = &http.Transport{
 			DialTLSContext:  httpDialContext,
 			DialContext:     httpDialContext,
-			IdleConnTimeout: 90 * time.Second,
+			IdleConnTimeout: connIdleTimeout,
 			// chunked transfer download with keepalives is buggy with
 			// http.Client and our custom dial context.
 			DisableKeepAlives: true,
 		}
-
 		// we use uploadRawPool for that
 		uploadTransport = nil
 	}
 
-	client := reusedClient{
+	client := &DefaultDialerClient{
+		transportConfig: streamSettings.ProtocolSettings.(*Config),
 		download: &http.Client{
 			Transport: downloadTransport,
 		},
@@ -123,6 +186,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 			Transport: uploadTransport,
 		},
 		isH2:           isH2,
+		isH3:           isH3,
 		uploadRawPool:  &sync.Pool{},
 		dialUploadConn: dialContext,
 	}
@@ -136,15 +200,16 @@ func init() {
 }
 
 func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (stat.Connection, error) {
-	newError("dialing splithttp to ", dest).WriteToLog(session.ExportIDToError(ctx))
+	errors.LogInfo(ctx, "dialing splithttp to ", dest)
 
 	var requestURL url.URL
 
 	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
 	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
 
-	maxConcurrentUploads := transportConfiguration.GetNormalizedMaxConcurrentUploads()
-	maxUploadSize := transportConfiguration.GetNormalizedMaxUploadSize()
+	scMaxConcurrentPosts := transportConfiguration.GetNormalizedScMaxConcurrentPosts()
+	scMaxEachPostBytes := transportConfiguration.GetNormalizedScMaxEachPostBytes()
+	scMinPostsIntervalMs := transportConfiguration.GetNormalizedScMinPostsIntervalMs()
 
 	if tlsConfig != nil {
 		requestURL.Scheme = "https"
@@ -155,85 +220,24 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	if requestURL.Host == "" {
 		requestURL.Host = dest.NetAddr()
 	}
-	requestURL.Path = transportConfiguration.GetNormalizedPath()
+
+	sessionIdUuid := uuid.New()
+	requestURL.Path = transportConfiguration.GetNormalizedPath() + sessionIdUuid.String()
+	requestURL.RawQuery = transportConfiguration.GetNormalizedQuery()
 
 	httpClient := getHTTPClient(ctx, dest, streamSettings)
 
-	var remoteAddr gonet.Addr
-	var localAddr gonet.Addr
-	// this is done when the TCP/UDP connection to the server was established,
-	// and we can unblock the Dial function and print correct net addresses in
-	// logs
-	gotConn := done.New()
-
-	var downResponse io.ReadCloser
-	gotDownResponse := done.New()
-
-	sessionIdUuid := uuid.New()
-	sessionId := sessionIdUuid.String()
+	maxUploadSize := scMaxEachPostBytes.roll()
+	// WithSizeLimit(0) will still allow single bytes to pass, and a lot of
+	// code relies on this behavior. Subtract 1 so that together with
+	// uploadWriter wrapper, exact size limits can be enforced
+	uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(maxUploadSize - 1))
 
 	go func() {
-		trace := &httptrace.ClientTrace{
-			GotConn: func(connInfo httptrace.GotConnInfo) {
-				remoteAddr = connInfo.Conn.RemoteAddr()
-				localAddr = connInfo.Conn.LocalAddr()
-				gotConn.Close()
-			},
-		}
-
-		// in case we hit an error, we want to unblock this part
-		defer gotConn.Close()
-
-		req, err := http.NewRequestWithContext(
-			httptrace.WithClientTrace(context.WithoutCancel(ctx), trace),
-			"GET",
-			requestURL.String()+sessionId,
-			nil,
-		)
-		if err != nil {
-			newError("failed to construct download http request").Base(err).WriteToLog()
-			gotDownResponse.Close()
-			return
-		}
-
-		req.Header = transportConfiguration.GetRequestHeader()
-
-		response, err := httpClient.download.Do(req)
-		gotConn.Close()
-		if err != nil {
-			newError("failed to send download http request").Base(err).WriteToLog()
-			gotDownResponse.Close()
-			return
-		}
-
-		if response.StatusCode != 200 {
-			response.Body.Close()
-			newError("invalid status code on download:", response.Status).WriteToLog()
-			gotDownResponse.Close()
-			return
-		}
-
-		// skip "ok" response
-		trashHeader := []byte{0, 0}
-		_, err = io.ReadFull(response.Body, trashHeader)
-		if err != nil {
-			response.Body.Close()
-			newError("failed to read initial response").Base(err).WriteToLog()
-			gotDownResponse.Close()
-			return
-		}
-
-		downResponse = response.Body
-		gotDownResponse.Close()
-	}()
-
-	uploadUrl := requestURL.String() + sessionId + "/"
-
-	uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(maxUploadSize))
-
-	go func() {
-		requestsLimiter := semaphore.New(int(maxConcurrentUploads))
+		requestsLimiter := semaphore.New(int(scMaxConcurrentPosts.roll()))
 		var requestCounter int64
+
+		lastWrite := time.Now()
 
 		// by offloading the uploads into a buffered pipe, multiple conn.Write
 		// calls get automatically batched together into larger POST requests.
@@ -246,91 +250,120 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 			<-requestsLimiter.Wait()
 
-			url := uploadUrl + strconv.FormatInt(requestCounter, 10)
+			seq := requestCounter
 			requestCounter += 1
 
 			go func() {
 				defer requestsLimiter.Signal()
-				req, err := http.NewRequest("POST", url, &buf.MultiBufferContainer{MultiBuffer: chunk})
+
+				// this intentionally makes a shallow-copy of the struct so we
+				// can reassign Path (potentially concurrently)
+				url := requestURL
+				url.Path += "/" + strconv.FormatInt(seq, 10)
+				// reassign query to get different padding
+				url.RawQuery = transportConfiguration.GetNormalizedQuery()
+
+				err := httpClient.SendUploadRequest(
+					context.WithoutCancel(ctx),
+					url.String(),
+					&buf.MultiBufferContainer{MultiBuffer: chunk},
+					int64(chunk.Len()),
+				)
+
 				if err != nil {
-					newError("failed to send upload").Base(err).WriteToLog()
+					errors.LogInfoInner(ctx, err, "failed to send upload")
 					uploadPipeReader.Interrupt()
-					return
-				}
-
-				req.Header = transportConfiguration.GetRequestHeader()
-
-				if httpClient.isH2 {
-					resp, err := httpClient.upload.Do(req)
-					if err != nil {
-						newError("failed to send upload").Base(err).WriteToLog()
-						uploadPipeReader.Interrupt()
-						return
-					}
-					defer resp.Body.Close()
-
-					if resp.StatusCode != 200 {
-						newError("failed to send upload, bad status code:", resp.Status).WriteToLog()
-						uploadPipeReader.Interrupt()
-						return
-					}
-				} else {
-					var err error
-					var uploadConn any
-					for i := 0; i < 5; i++ {
-						uploadConn = httpClient.uploadRawPool.Get()
-						if uploadConn == nil {
-							uploadConn, err = httpClient.dialUploadConn(context.WithoutCancel(ctx))
-							if err != nil {
-								newError("failed to connect upload").Base(err).WriteToLog()
-								uploadPipeReader.Interrupt()
-								return
-							}
-						}
-
-						err = req.Write(uploadConn.(net.Conn))
-						if err == nil {
-							break
-						}
-					}
-
-					if err != nil {
-						newError("failed to send upload").Base(err).WriteToLog()
-						uploadPipeReader.Interrupt()
-						return
-					}
-
-					httpClient.uploadRawPool.Put(uploadConn)
 				}
 			}()
 
+			if scMinPostsIntervalMs.From > 0 {
+				roll := time.Duration(scMinPostsIntervalMs.roll()) * time.Millisecond
+				if time.Since(lastWrite) < roll {
+					time.Sleep(roll)
+				}
+
+				lastWrite = time.Now()
+			}
 		}
 	}()
 
-	// we want to block Dial until we know the remote address of the server,
-	// for logging purposes
-	<-gotConn.Wait()
-
-	// necessary in order to send larger chunks in upload
-	bufferedUploadPipeWriter := buf.NewBufferedWriter(uploadPipeWriter)
-	bufferedUploadPipeWriter.SetBuffered(false)
+	lazyRawDownload, remoteAddr, localAddr, err := httpClient.OpenDownload(context.WithoutCancel(ctx), requestURL.String())
+	if err != nil {
+		return nil, err
+	}
 
 	lazyDownload := &LazyReader{
 		CreateReader: func() (io.ReadCloser, error) {
-			<-gotDownResponse.Wait()
-			if downResponse == nil {
-				return nil, newError("downResponse failed")
+			// skip "ok" response
+			trashHeader := []byte{0, 0}
+			_, err := io.ReadFull(lazyRawDownload, trashHeader)
+			if err != nil {
+				return nil, errors.New("failed to read initial response").Base(err)
 			}
-			return downResponse, nil
+
+			if bytes.Equal(trashHeader, []byte("ok")) {
+				return lazyRawDownload, nil
+			}
+
+			// we read some garbage byte that may not have been "ok" at
+			// all. return a reader that replays what we have read so far
+			reader := io.MultiReader(
+				bytes.NewReader(trashHeader),
+				lazyRawDownload,
+			)
+			readCloser := struct {
+				io.Reader
+				io.Closer
+			}{
+				Reader: reader,
+				Closer: lazyRawDownload,
+			}
+			return readCloser, nil
 		},
 	}
 
+	writer := uploadWriter{
+		uploadPipeWriter,
+		maxUploadSize,
+	}
+
 	conn := splitConn{
-		writer:     bufferedUploadPipeWriter,
+		writer:     writer,
 		reader:     lazyDownload,
 		remoteAddr: remoteAddr,
 		localAddr:  localAddr,
 	}
 
 	return stat.Connection(&conn), nil
+}
+
+// A wrapper around pipe that ensures the size limit is exactly honored.
+//
+// The MultiBuffer pipe accepts any single WriteMultiBuffer call even if that
+// single MultiBuffer exceeds the size limit, and then starts blocking on the
+// next WriteMultiBuffer call. This means that ReadMultiBuffer can return more
+// bytes than the size limit. We work around this by splitting a potentially
+// too large write up into multiple.
+type uploadWriter struct {
+	*pipe.Writer
+	maxLen int32
+}
+
+func (w uploadWriter) Write(b []byte) (int, error) {
+	capacity := int(w.maxLen - w.Len())
+	if capacity > 0 && capacity < len(b) {
+		b = b[:capacity]
+	}
+
+	buffer := buf.New()
+	n, err := buffer.Write(b)
+	if err != nil {
+		return 0, err
+	}
+
+	err = w.WriteMultiBuffer([]*buf.Buffer{buffer})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }

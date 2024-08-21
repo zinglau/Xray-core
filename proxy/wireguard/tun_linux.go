@@ -73,7 +73,7 @@ func (d *deviceNet) Close() (err error) {
 
 func createKernelTun(localAddresses []netip.Addr, mtu int, handler promiscuousModeHandler) (t Tunnel, err error) {
 	if handler != nil {
-		return nil, newError("TODO: support promiscuous mode")
+		return nil, errors.New("TODO: support promiscuous mode")
 	}
 
 	var v4, v6 *netip.Addr
@@ -199,6 +199,9 @@ func createKernelTun(localAddresses []netip.Addr, mtu int, handler promiscuousMo
 
 		r := netlink.NewRule()
 		r.Table, r.Family, r.Src = ipv6TableIndex, unix.AF_INET6, addr.IPNet
+		out.rules = append(out.rules, r)
+		r = netlink.NewRule()
+		r.Table, r.Family, r.OifName = ipv6TableIndex, unix.AF_INET6, n
 		out.rules = append(out.rules, r)
 	}
 
