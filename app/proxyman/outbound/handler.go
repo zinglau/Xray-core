@@ -306,8 +306,7 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 					if useIncoming {
 						outbounds := session.OutboundsFromContext(ctx)
 						ob := outbounds[len(outbounds) - 1]
-						newError("egressing through incoming IP ", localIP, " for destination ", dest.String()).
-							AtDebug().WriteToLog(session.ExportIDToError(ctx))
+						errors.LogInfo(ctx, "egressing through incoming IP ", localIP, " for destination ", dest.String())
 						ob.Gateway = net.ParseAddress(localIP)
 					}
 				}
