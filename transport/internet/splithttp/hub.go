@@ -13,12 +13,14 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	goreality "github.com/xtls/reality"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	http_proto "github.com/xtls/xray-core/common/protocol/http"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	v2tls "github.com/xtls/xray-core/transport/internet/tls"
 	"golang.org/x/net/http2"
@@ -98,6 +100,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
+	h.config.WriteResponseHeader(writer)
+
 	sessionId := ""
 	subpath := strings.Split(request.URL.Path[len(h.path):], "/")
 	if len(subpath) > 0 {
@@ -132,7 +136,26 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 
 		if seq == "" {
-			errors.LogInfo(context.Background(), "no seq on request:", request.URL.Path)
+			if h.config.Mode == "packet-up" {
+				errors.LogInfo(context.Background(), "stream-up mode is not allowed")
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			err = currentSession.uploadQueue.Push(Packet{
+				Reader: request.Body,
+			})
+			if err != nil {
+				errors.LogInfoInner(context.Background(), err, "failed to upload (PushReader)")
+				writer.WriteHeader(http.StatusConflict)
+			} else {
+				writer.WriteHeader(http.StatusOK)
+				<-request.Context().Done()
+			}
+			return
+		}
+
+		if h.config.Mode == "stream-up" {
+			errors.LogInfo(context.Background(), "packet-up mode is not allowed")
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -146,14 +169,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 
 		if err != nil {
-			errors.LogInfoInner(context.Background(), err, "failed to upload")
+			errors.LogInfoInner(context.Background(), err, "failed to upload (ReadAll)")
 			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
 		seqInt, err := strconv.ParseUint(seq, 10, 64)
 		if err != nil {
-			errors.LogInfoInner(context.Background(), err, "failed to upload")
+			errors.LogInfoInner(context.Background(), err, "failed to upload (ParseUint)")
 			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -164,12 +187,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		})
 
 		if err != nil {
-			errors.LogInfoInner(context.Background(), err, "failed to upload")
+			errors.LogInfoInner(context.Background(), err, "failed to upload (PushPayload)")
 			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		h.config.WriteResponseHeader(writer)
 		writer.WriteHeader(http.StatusOK)
 	} else if request.Method == "GET" {
 		responseFlusher, ok := writer.(http.Flusher)
@@ -192,8 +214,6 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// magic header to make the HTTP middle box consider this as SSE to disable buffer
 			writer.Header().Set("Content-Type", "text/event-stream")
 		}
-
-		h.config.WriteResponseHeader(writer)
 
 		writer.WriteHeader(http.StatusOK)
 
@@ -221,6 +241,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		conn.Close()
 	} else {
+		errors.LogInfo(context.Background(), "unsupported method: ", request.Method)
 		writer.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
@@ -342,6 +363,10 @@ func ListenSH(ctx context.Context, address net.Address, port net.Port, streamSet
 			if tlsConfig := config.GetTLSConfig(); tlsConfig != nil {
 				listener = tls.NewListener(listener, tlsConfig)
 			}
+		}
+
+		if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
+			listener = goreality.NewListener(listener, config.GetREALITYConfig())
 		}
 
 		// h2cHandler can handle both plaintext HTTP/1.1 and h2c

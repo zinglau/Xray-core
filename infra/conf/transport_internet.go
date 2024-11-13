@@ -232,6 +232,9 @@ type SplitHTTPConfig struct {
 	NoSSEHeader          bool              `json:"noSSEHeader"`
 	XPaddingBytes        *Int32Range       `json:"xPaddingBytes"`
 	Xmux                 Xmux              `json:"xmux"`
+	DownloadSettings     *StreamConfig     `json:"downloadSettings"`
+	Mode                 string            `json:"mode"`
+	Extra                json.RawMessage   `json:"extra"`
 }
 
 type Xmux struct {
@@ -243,7 +246,10 @@ type Xmux struct {
 
 func splithttpNewRandRangeConfig(input *Int32Range) *splithttp.RandRangeConfig {
 	if input == nil {
-		return nil
+		return &splithttp.RandRangeConfig{
+			From: 0,
+			To:   0,
+		}
 	}
 
 	return &splithttp.RandRangeConfig{
@@ -254,6 +260,18 @@ func splithttpNewRandRangeConfig(input *Int32Range) *splithttp.RandRangeConfig {
 
 // Build implements Buildable.
 func (c *SplitHTTPConfig) Build() (proto.Message, error) {
+	if c.Extra != nil {
+		var extra SplitHTTPConfig
+		if err := json.Unmarshal(c.Extra, &extra); err != nil {
+			return nil, errors.New(`Failed to unmarshal "extra".`).Base(err)
+		}
+		extra.Host = c.Host
+		extra.Path = c.Path
+		extra.Mode = c.Mode
+		extra.Extra = c.Extra
+		c = &extra
+	}
+
 	// If http host is not set in the Host field, but in headers field, we add it to Host Field here.
 	// If we don't do that, http host will be overwritten as address.
 	// Host priority: Host field > headers field > address.
@@ -275,6 +293,24 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		CMaxLifetimeMs: splithttpNewRandRangeConfig(c.Xmux.CMaxLifetimeMs),
 	}
 
+	if muxProtobuf.MaxConcurrency.To == 0 &&
+		muxProtobuf.MaxConnections.To == 0 &&
+		muxProtobuf.CMaxReuseTimes.To == 0 &&
+		muxProtobuf.CMaxLifetimeMs.To == 0 {
+		muxProtobuf.MaxConcurrency.From = 16
+		muxProtobuf.MaxConcurrency.To = 32
+		muxProtobuf.CMaxReuseTimes.From = 64
+		muxProtobuf.CMaxReuseTimes.To = 128
+	}
+
+	switch c.Mode {
+	case "":
+		c.Mode = "auto"
+	case "auto", "packet-up", "stream-up":
+	default:
+		return nil, errors.New("unsupported mode: " + c.Mode)
+	}
+
 	config := &splithttp.Config{
 		Path:                 c.Path,
 		Host:                 c.Host,
@@ -285,6 +321,16 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		NoSSEHeader:          c.NoSSEHeader,
 		XPaddingBytes:        splithttpNewRandRangeConfig(c.XPaddingBytes),
 		Xmux:                 &muxProtobuf,
+		Mode:                 c.Mode,
+	}
+	var err error
+	if c.DownloadSettings != nil {
+		if c.Extra != nil {
+			c.DownloadSettings.SocketSettings = nil
+		}
+		if config.DownloadSettings, err = c.DownloadSettings.Build(); err != nil {
+			return nil, errors.New(`Failed to build "downloadSettings".`).Base(err)
+		}
 	}
 	return config, nil
 }
@@ -410,6 +456,7 @@ type TLSConfig struct {
 	RejectUnknownSNI                     bool             `json:"rejectUnknownSni"`
 	PinnedPeerCertificateChainSha256     *[]string        `json:"pinnedPeerCertificateChainSha256"`
 	PinnedPeerCertificatePublicKeySha256 *[]string        `json:"pinnedPeerCertificatePublicKeySha256"`
+	CurvePreferences                     *StringList      `json:"curvePreferences"`
 	MasterKeyLog                         string           `json:"masterKeyLog"`
 }
 
@@ -431,6 +478,9 @@ func (c *TLSConfig) Build() (proto.Message, error) {
 	}
 	if c.ALPN != nil && len(*c.ALPN) > 0 {
 		config.NextProtocol = []string(*c.ALPN)
+	}
+	if c.CurvePreferences != nil && len(*c.CurvePreferences) > 0 {
+		config.CurvePreferences = []string(*c.CurvePreferences)
 	}
 	config.EnableSessionResumption = c.EnableSessionResumption
 	config.DisableSystemRoot = c.DisableSystemRoot
@@ -471,10 +521,10 @@ func (c *TLSConfig) Build() (proto.Message, error) {
 }
 
 type REALITYConfig struct {
-	Show         bool            `json:"show"`
 	MasterKeyLog string          `json:"masterKeyLog"`
-	Dest         json.RawMessage `json:"dest"`
+	Show         bool            `json:"show"`
 	Target       json.RawMessage `json:"target"`
+	Dest         json.RawMessage `json:"dest"`
 	Type         string          `json:"type"`
 	Xver         uint64          `json:"xver"`
 	ServerNames  []string        `json:"serverNames"`
@@ -493,10 +543,10 @@ type REALITYConfig struct {
 
 func (c *REALITYConfig) Build() (proto.Message, error) {
 	config := new(reality.Config)
-	config.Show = c.Show
 	config.MasterKeyLog = c.MasterKeyLog
+	config.Show = c.Show
 	var err error
-	if c.Dest == nil {
+	if c.Target != nil {
 		c.Dest = c.Target
 	}
 	if c.Dest != nil {
@@ -526,7 +576,7 @@ func (c *REALITYConfig) Build() (proto.Message, error) {
 			}
 		}
 		if c.Type == "" {
-			return nil, errors.New(`please fill in a valid value for "dest" or "target"`)
+			return nil, errors.New(`please fill in a valid value for "target"`)
 		}
 		if c.Xver > 2 {
 			return nil, errors.New(`invalid PROXY protocol version, "xver" only accepts 0, 1, 2`)
@@ -548,7 +598,7 @@ func (c *REALITYConfig) Build() (proto.Message, error) {
 					return nil, errors.New(`invalid "minClientVer": `, c.MinClientVer)
 				}
 				if u, err = strconv.ParseUint(s, 10, 8); err != nil {
-					return nil, errors.New(`"minClientVer[`, i, `]" should be lesser than 256`)
+					return nil, errors.New(`"minClientVer[`, i, `]" should be less than 256`)
 				} else {
 					config.MinClientVer[i] = byte(u)
 				}
@@ -562,7 +612,7 @@ func (c *REALITYConfig) Build() (proto.Message, error) {
 					return nil, errors.New(`invalid "maxClientVer": `, c.MaxClientVer)
 				}
 				if u, err = strconv.ParseUint(s, 10, 8); err != nil {
-					return nil, errors.New(`"maxClientVer[`, i, `]" should be lesser than 256`)
+					return nil, errors.New(`"maxClientVer[`, i, `]" should be less than 256`)
 				} else {
 					config.MaxClientVer[i] = byte(u)
 				}
@@ -656,11 +706,11 @@ func (p TransportProtocol) Build() (string, error) {
 		return "websocket", nil
 	case "h2", "h3", "http":
 		return "http", nil
-	case "grpc", "gun":
+	case "grpc":
 		return "grpc", nil
 	case "httpupgrade":
 		return "httpupgrade", nil
-	case "splithttp":
+	case "xhttp", "splithttp":
 		return "splithttp", nil
 	default:
 		return "", errors.New("Config: unknown transport protocol: ", p)
@@ -783,6 +833,8 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 }
 
 type StreamConfig struct {
+	Address             *Address           `json:"address"`
+	Port                uint16             `json:"port"`
 	Network             *TransportProtocol `json:"network"`
 	Security            string             `json:"security"`
 	TLSSettings         *TLSConfig         `json:"tlsSettings"`
@@ -794,15 +846,19 @@ type StreamConfig struct {
 	HTTPSettings        *HTTPConfig        `json:"httpSettings"`
 	SocketSettings      *SocketConfig      `json:"sockopt"`
 	GRPCConfig          *GRPCConfig        `json:"grpcSettings"`
-	GUNConfig           *GRPCConfig        `json:"gunSettings"`
 	HTTPUPGRADESettings *HttpUpgradeConfig `json:"httpupgradeSettings"`
+	XHTTPSettings       *SplitHTTPConfig   `json:"xhttpSettings"`
 	SplitHTTPSettings   *SplitHTTPConfig   `json:"splithttpSettings"`
 }
 
 // Build implements Buildable.
 func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 	config := &internet.StreamConfig{
+		Port:         uint32(c.Port),
 		ProtocolName: "tcp",
+	}
+	if c.Address != nil {
+		config.Address = c.Address.Build()
 	}
 	if c.Network != nil {
 		protocol, err := c.Network.Build()
@@ -826,8 +882,8 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 		config.SecuritySettings = append(config.SecuritySettings, tm)
 		config.SecurityType = tm.Type
 	case "reality":
-		if config.ProtocolName != "tcp" && config.ProtocolName != "http" && config.ProtocolName != "grpc" {
-			return nil, errors.New("REALITY only supports TCP, H2 and gRPC for now.")
+		if config.ProtocolName != "tcp" && config.ProtocolName != "http" && config.ProtocolName != "grpc" && config.ProtocolName != "splithttp" {
+			return nil, errors.New("REALITY only supports RAW, H2, gRPC and XHTTP for now.")
 		}
 		if c.REALITYSettings == nil {
 			return nil, errors.New(`REALITY: Empty "realitySettings".`)
@@ -844,7 +900,7 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 	default:
 		return nil, errors.New(`Unknown security "` + c.Security + `".`)
 	}
-	if c.TCPSettings == nil {
+	if c.RAWSettings != nil {
 		c.TCPSettings = c.RAWSettings
 	}
 	if c.TCPSettings != nil {
@@ -887,9 +943,6 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 			Settings:     serial.ToTypedMessage(ts),
 		})
 	}
-	if c.GRPCConfig == nil {
-		c.GRPCConfig = c.GUNConfig
-	}
 	if c.GRPCConfig != nil {
 		gs, err := c.GRPCConfig.Build()
 		if err != nil {
@@ -910,10 +963,13 @@ func (c *StreamConfig) Build() (*internet.StreamConfig, error) {
 			Settings:     serial.ToTypedMessage(hs),
 		})
 	}
+	if c.XHTTPSettings != nil {
+		c.SplitHTTPSettings = c.XHTTPSettings
+	}
 	if c.SplitHTTPSettings != nil {
 		hs, err := c.SplitHTTPSettings.Build()
 		if err != nil {
-			return nil, errors.New("Failed to build SplitHTTP config.").Base(err)
+			return nil, errors.New("Failed to build XHTTP config.").Base(err)
 		}
 		config.TransportSettings = append(config.TransportSettings, &internet.TransportConfig{
 			ProtocolName: "splithttp",
