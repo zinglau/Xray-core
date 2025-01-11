@@ -36,8 +36,6 @@ import (
 	"golang.org/x/net/http2"
 )
 
-//go:generate go run github.com/xtls/xray-core/common/errors/errorgen
-
 //go:linkname aesgcmPreferred github.com/refraction-networking/utls.aesgcmPreferred
 func aesgcmPreferred(ciphers []uint16) bool
 
@@ -257,7 +255,7 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 			// Do not close the connection
 		}()
 		time.Sleep(time.Duration(randBetween(config.SpiderY[8], config.SpiderY[9])) * time.Millisecond) // return
-		return nil, errors.New("REALITY: processed invalid connection")
+		return nil, errors.New("REALITY: processed invalid connection").AtWarning()
 	}
 	return uConn, nil
 }

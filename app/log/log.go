@@ -1,7 +1,5 @@
 package log
 
-//go:generate go run github.com/xtls/xray-core/common/errors/errorgen
-
 import (
 	"context"
 	"fmt"
@@ -33,8 +31,8 @@ func New(ctx context.Context, config *Config) (*Instance, error) {
 	}
 	log.RegisterHandler(g)
 
-	// Start logger instantly on initialization
-	// Other modules would log during initialization
+	// start logger now,
+	// then other modules will be able to log during initialization
 	if err := g.startInternal(); err != nil {
 		return nil, err
 	}

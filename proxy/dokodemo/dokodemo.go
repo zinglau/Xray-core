@@ -1,11 +1,9 @@
 package dokodemo
 
-//go:generate go run github.com/xtls/xray-core/common/errors/errorgen
-
 import (
 	"context"
+	"runtime"
 	"sync/atomic"
-	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -42,7 +40,7 @@ type DokodemoDoor struct {
 
 // Init initializes the DokodemoDoor instance with necessary parameters.
 func (d *DokodemoDoor) Init(config *Config, pm policy.Manager, sockopt *session.Sockopt) error {
-	if (config.NetworkList == nil || len(config.NetworkList.Network) == 0) && len(config.Networks) == 0 {
+	if len(config.Networks) == 0 {
 		return errors.New("no network specified")
 	}
 	d.config = config
@@ -56,19 +54,12 @@ func (d *DokodemoDoor) Init(config *Config, pm policy.Manager, sockopt *session.
 
 // Network implements proxy.Inbound.
 func (d *DokodemoDoor) Network() []net.Network {
-	if len(d.config.Networks) > 0 {
-		return d.config.Networks
-	}
-
-	return d.config.NetworkList.Network
+	return d.config.Networks
 }
 
 func (d *DokodemoDoor) policy() policy.Session {
 	config := d.config
 	p := d.policyManager.ForLevel(config.UserLevel)
-	if config.Timeout > 0 && config.UserLevel == 0 {
-		p.Timeouts.ConnectionIdle = time.Duration(config.Timeout) * time.Second
-	}
 	return p
 }
 
@@ -157,10 +148,6 @@ func (d *DokodemoDoor) Process(ctx context.Context, network net.Network, conn st
 		return nil
 	}
 
-	tproxyRequest := func() error {
-		return nil
-	}
-
 	var writer buf.Writer
 	if network == net.Network_TCP {
 		writer = buf.NewWriter(conn)
@@ -190,7 +177,12 @@ func (d *DokodemoDoor) Process(ctx context.Context, network net.Network, conn st
 				return err
 			}
 			writer = NewPacketWriter(pConn, &dest, mark, back)
-			defer writer.(*PacketWriter).Close()
+			defer func() {
+				runtime.Gosched()
+				common.Interrupt(link.Reader) // maybe duplicated
+				runtime.Gosched()
+				writer.(*PacketWriter).Close() // close fake UDP conns
+			}()
 			/*
 				sockopt := &internet.SocketConfig{
 					Tproxy: internet.SocketConfig_TProxy,
@@ -229,17 +221,24 @@ func (d *DokodemoDoor) Process(ctx context.Context, network net.Network, conn st
 	responseDone := func() error {
 		defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
 
+		if network == net.Network_UDP && destinationOverridden {
+			buf.Copy(link.Reader, writer) // respect upload's timeout
+			return nil
+		}
+
 		if err := buf.Copy(link.Reader, writer, buf.UpdateActivity(timer)); err != nil {
 			return errors.New("failed to transport response").Base(err)
 		}
 		return nil
 	}
 
-	if err := task.Run(ctx, task.OnSuccess(func() error {
-		return task.Run(ctx, requestDone, tproxyRequest)
-	}, task.Close(link.Writer)), responseDone); err != nil {
-		common.Interrupt(link.Reader)
+	if err := task.Run(ctx,
+		task.OnSuccess(func() error { return task.Run(ctx, requestDone) }, task.Close(link.Writer)),
+		responseDone); err != nil {
+		runtime.Gosched()
 		common.Interrupt(link.Writer)
+		runtime.Gosched()
+		common.Interrupt(link.Reader)
 		return errors.New("connection ends").Base(err)
 	}
 

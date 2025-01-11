@@ -1,7 +1,5 @@
 package command
 
-//go:generate go run github.com/xtls/xray-core/common/errors/errorgen
-
 import (
 	"context"
 	"time"
@@ -137,7 +135,7 @@ func (s *service) Register(server *grpc.Server) {
 		vCoreDesc := RoutingService_ServiceDesc
 		vCoreDesc.ServiceName = "v2ray.core.app.router.command.RoutingService"
 		server.RegisterService(&vCoreDesc, rs)
-	}))
+	}, false))
 }
 
 func init() {
