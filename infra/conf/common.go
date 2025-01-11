@@ -2,6 +2,7 @@ package conf
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -42,8 +43,8 @@ type Address struct {
 	net.Address
 }
 
-func (v *Address) MarshalJSON() ([]byte, error) {
-	return json.Marshal(v.String())
+func (v Address) MarshalJSON() ([]byte, error) {
+	return json.Marshal(v.Address.String())
 }
 
 func (v *Address) UnmarshalJSON(data []byte) error {
@@ -265,6 +266,18 @@ type Int32Range struct {
 	Right int32
 	From  int32
 	To    int32
+}
+
+func (v Int32Range) MarshalJSON() ([]byte, error) {
+	return json.Marshal(v.String())
+}
+
+func (v Int32Range) String() string {
+	if v.Left == v.Right {
+		return strconv.Itoa(int(v.Left))
+	} else {
+		return fmt.Sprintf("%d-%d", v.Left, v.Right)
+	}
 }
 
 func (v *Int32Range) UnmarshalJSON(data []byte) error {
