@@ -67,13 +67,23 @@ jobs:
           - goos: linux
             goarch: mips64
           - goos: linux
+            goarch: mips64
+            gomips: softfloat
+          - goos: linux
             goarch: mips64le
           - goos: linux
-            goarch: mipsle-sf
+            goarch: mips64le
+            gomips: softfloat
           - goos: linux
             goarch: mipsle
           - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+          - goos: linux
             goarch: mips
+          - goos: linux
+            goarch: mips
+            gomips: softfloat
           # END MIPS
           # BEGIN PPC
           - goos: linux
